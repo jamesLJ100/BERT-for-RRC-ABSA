@@ -30,7 +30,7 @@ def main():
         if not os.path.exists(valid_json):
             train_command = [
                 "python", "../src/run_rrc_adversarial.py",
-                "--bert_model", bert, "--do_train", "--do_valid", #"--do_adv", "--adv_epsilon", "0.2",
+                "--bert_model", bert, "--do_train", "--do_valid", "--do_adv", "--adv_epsilon", "0.2",
                 "--gradient_accumulation_steps", "2",
                 "--max_seq_length", "320", "--train_batch_size", "16",
                 "--learning_rate", "3e-5", "--num_train_epochs", "4",
