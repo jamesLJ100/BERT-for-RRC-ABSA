@@ -38,6 +38,30 @@ def warmup_linear(x, warmup=0.002):
         return x / warmup
     return 1.0 - x
 
+class FGM:
+    def __init__(self, model):
+        self.model = model
+        self.backup = {}
+
+    def attack(self, epsilon=1.0, emb_name='word_embeddings'):
+        # Loop over model parameters and add perturbation to embedding parameters
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and emb_name in name:
+                # Save original parameter values
+                self.backup[name] = param.data.clone()
+                # compute perturbation
+                if param.grad is None:
+                    continue
+                norm = torch.norm(param.grad)
+                if norm != 0:
+                    r_at = epsilon * param.grad / norm
+                    param.data.add_(r_at)
+
+    def restore(self, emb_name='word_embeddings'):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and emb_name in name and name in self.backup:
+                param.data = self.backup[name]
+        self.backup = {}
 
 
 class HSUMQA(torch.nn.Module):
@@ -202,6 +226,10 @@ def train(args):
                                                 num_training_steps=num_train_steps)
 
     global_step = 0
+
+    if args.do_adv:
+        fgm = FGM(model)
+
     model.train()
     for _ in range(args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
@@ -220,11 +248,35 @@ def train(args):
                 loss = loss / args.gradient_accumulation_steps
             loss.backward()
 
-            if (step + 1) % args.gradient_accumulation_steps == 0:
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-                global_step += 1
+            if args.do_adv:
+                # Apply adversarial perturbation to word embeddings
+                fgm.attack(epsilon=args.adv_epsilon, emb_name='word_embeddings')
+                # Forward pass on adversarial examples
+
+                adv_output = model(
+                    input_ids=input_ids,
+                    attention_mask=input_mask,
+                    token_type_ids=segment_ids,
+                    start_positions=start_positions,
+                    end_positions=end_positions,
+                )
+
+                adv_loss = adv_output["loss"]
+                if args.gradient_accumulation_steps > 1:
+                    adv_loss = adv_loss / args.gradient_accumulation_steps
+                if args.fp16:
+                    optimizer.backward(adv_loss)
+                else:
+                    adv_loss.backward()
+                # Restore the original parameters
+                fgm.restore(emb_name='word_embeddings')
+            # ------------------------------------
+
+        if (step + 1) % args.gradient_accumulation_steps == 0:
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+            global_step += 1
 
         if args.do_valid:
             model.eval()
@@ -336,6 +388,14 @@ def main():
                         help="Whether to use 16-bit precision instead of 32-bit")
     parser.add_argument('--loss_scale', type=float, default=0, help="Loss scaling for fp16 training")
     parser.add_argument('--n_best_size', type=int, default=20)
+    parser.add_argument("--do_adv",
+                        default=True,
+                        action='store_true',
+                        help="Whether to perform adversarial training.")
+    parser.add_argument("--adv_epsilon",
+                        default=0.2,
+                        type=float,
+                        help="Magnitude of adversarial perturbation.")
 
     args = parser.parse_args()
 
